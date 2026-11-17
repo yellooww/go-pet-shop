@@ -15,8 +15,8 @@ func (s *Storage) CreateOrder(ctx context.Context, o models.Order) (int, error) 
 
 	var id int
 	err := s.db.QueryRow(ctx,
-		`INSERT INTO orders (user_id, total_price, CreatedAt) VALUES ($1, $2, $3) RETURNING id`,
-		o.UserID, o.TotalPrice, o.CreatedAt).Scan(&id)
+		`INSERT INTO orders (user_id, total_price) VALUES ($1, 0) RETURNING id`,
+		o.UserID).Scan(&id)
 
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", fn, err)
@@ -25,18 +25,69 @@ func (s *Storage) CreateOrder(ctx context.Context, o models.Order) (int, error) 
 	return id, nil
 }
 
-func (s *Storage) AddOrderItem(ctx context.Context, orderItem models.OrderItem) error {
+func (s *Storage) AddOrderItem(ctx context.Context, oi models.OrderItem) (int, error) {
 	const fn = "storage.postgres.order.AddOrderItem"
 
-	_, err := s.db.Exec(ctx,
-		`INSERT INTO order_items (order_id, product_id, quantity) VALUES ($1, $2, $3)`,
-		orderItem.OrderID, orderItem.ProductID, orderItem.Quantity)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Проверяем существование заказа
+	var orderID int
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM orders WHERE id = $1`,
+		oi.OrderID,
+	).Scan(&orderID)
 
 	if err != nil {
-		return fmt.Errorf("%s: %w", fn, err)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("%s: %w", fn, storage.ErrNotFound)
+		}
+		return 0, fmt.Errorf("%s: %w", fn, err)
 	}
 
-	return nil
+	// Проверяем существование товара
+	var productID int
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM products WHERE id = $1`,
+		oi.ProductID,
+	).Scan(&productID)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("%s: %w", fn, storage.ErrNotFound)
+		}
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+
+	var itemID int
+	err = tx.QueryRow(ctx,
+		`INSERT INTO order_items (order_id, product_id, quantity) VALUES ($1, $2, $3) RETURNING id`,
+		oi.OrderID, oi.ProductID, oi.Quantity).Scan(&itemID)
+
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+
+	_, err = tx.Exec(ctx,
+		`UPDATE orders
+         SET total_price = total_price +
+             (SELECT price * $1 FROM products WHERE id = $2)
+         WHERE id = $3`,
+		oi.Quantity, oi.ProductID, oi.OrderID,
+	)
+
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+
+	return itemID, nil
 }
 
 func (s *Storage) GetOrderByID(ctx context.Context, id int) (models.Order, error) {
@@ -61,8 +112,8 @@ func (s *Storage) GetOrdersByUserEmail(ctx context.Context, email string) ([]mod
 	const fn = "storage.postgres.order.GetOrdersByUserEmail"
 
 	rows, err := s.db.Query(ctx,
-		`SELECT id, user_id, total_price, created_at FROM orders WHERE user_id = (SELECT id FROM users WHERE email = $1)`,
-		email)
+		`SELECT o.id, o.user_id, o.total_price, o.created_at FROM orders o JOIN users u ON u.id = o.user_id
+		WHERE u.email = $1 ORDER BY o.created_at DESC;`, email)
 
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", fn, err)
