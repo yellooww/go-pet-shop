@@ -22,6 +22,8 @@ type Orders interface {
 	GetOrderByID(ctx context.Context, id int) (models.Order, error)
 	GetOrdersByUserEmail(ctx context.Context, email string) ([]models.Order, error)
 	GetOrderItemsByOrderID(ctx context.Context, orderID int) ([]models.OrderItem, error)
+
+	PlaceOrder(ctx context.Context, userEmail string, items []models.OrderItem) (int, error)
 }
 
 type Handler struct {
@@ -304,4 +306,110 @@ func (h *Handler) GetOrdersByUserEmail(w http.ResponseWriter, r *http.Request) {
 	)
 
 	render.JSON(w, r, orders)
+}
+
+func (h *Handler) PlaceOrder(w http.ResponseWriter, r *http.Request) {
+	const fn = "handlers.orders.PlaceOrder"
+
+	log := h.log.With(
+		slog.String("fn", fn),
+		slog.String("request_id", middleware.GetReqID(r.Context())),
+	)
+
+	log.Info("Placing order", slog.String("url", r.URL.String()))
+
+	var request struct {
+		UserEmail string             `json:"user_email"`
+		Items     []models.OrderItem `json:"items"`
+	}
+
+	if err := render.DecodeJSON(r.Body, &request); err != nil {
+		log.Error("failed to decode request body", slog.Any("error", err))
+		w.WriteHeader(http.StatusBadRequest)
+		render.JSON(w, r, map[string]string{
+			"error":   "Bad request",
+			"message": "Invalid JSON payload",
+		})
+		return
+	}
+
+	if request.UserEmail == "" {
+		log.Error("empty user_email in request")
+		w.WriteHeader(http.StatusBadRequest)
+		render.JSON(w, r, map[string]string{
+			"error":   "Bad request",
+			"message": "User email is required",
+		})
+		return
+	}
+
+	if len(request.Items) == 0 {
+		log.Error("empty items in request")
+		w.WriteHeader(http.StatusBadRequest)
+		render.JSON(w, r, map[string]string{
+			"error":   "Bad request",
+			"message": "At least one order item is required",
+		})
+		return
+	}
+
+	for _, item := range request.Items {
+		if item.ProductID <= 0 || item.Quantity <= 0 {
+			log.Error("invalid product_id or quantity in items", slog.Int("product_id", item.ProductID), slog.Int("quantity", item.Quantity))
+			w.WriteHeader(http.StatusBadRequest)
+			render.JSON(w, r, map[string]string{
+				"error":   "Bad request",
+				"message": "Invalid product ID or quantity in items",
+			})
+			return
+		}
+	}
+
+	orderID, err := h.storage.PlaceOrder(r.Context(), request.UserEmail, request.Items)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			log.Error("user or product not found", slog.String("user_email", request.UserEmail))
+			w.WriteHeader(http.StatusNotFound)
+			render.JSON(w, r, map[string]string{
+				"error":   "Not found",
+				"message": "User or product not found",
+			})
+			return
+		}
+
+		if errors.Is(err, storage.ErrInsufficientStock) {
+			log.Error("insufficient stock for one or more products", slog.String("user_email", request.UserEmail))
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			render.JSON(w, r, map[string]string{
+				"error":   "Unprocessable Entity",
+				"message": "Insufficient product stock",
+			})
+			return
+		}
+
+		if errors.Is(err, storage.ErrInvalidInput) {
+			log.Error("invalid input", slog.String("user_email", request.UserEmail))
+			w.WriteHeader(http.StatusBadRequest)
+			render.JSON(w, r, map[string]string{
+				"error":   "Bad request",
+				"message": "Invalid input data",
+			})
+			return
+		}
+
+		log.Error("failed to place order", slog.Any("error", err))
+		w.WriteHeader(http.StatusInternalServerError)
+		render.JSON(w, r, map[string]string{
+			"error":   "Internal server error",
+			"message": "Failed to place order",
+		})
+		return
+	}
+
+	log.Info("Order placed successfully", slog.Int("order_id", orderID))
+	w.WriteHeader(http.StatusCreated)
+	render.JSON(w, r, map[string]interface{}{
+		"status":   "Order placed successfully",
+		"order_id": orderID,
+	})
 }

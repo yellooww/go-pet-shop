@@ -163,3 +163,103 @@ func (s *Storage) GetOrderItemsByOrderID(ctx context.Context, orderID int) ([]mo
 
 	return orderItems, nil
 }
+
+func (s *Storage) PlaceOrder(ctx context.Context, userEmail string, items []models.OrderItem) (int, error) {
+	const fn = "storage.postgres.order.PlaceOrder"
+
+	if len(items) == 0 {
+		return 0, fmt.Errorf("%s: %w", fn, storage.ErrInvalidInput)
+	}
+
+	for _, item := range items {
+		if item.ProductID <= 0 || item.Quantity <= 0 {
+			return 0, fmt.Errorf("%s: %w", fn, storage.ErrInvalidInput)
+		}
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+	defer tx.Rollback(ctx)
+
+	var userID int
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM users WHERE email = $1`,
+		userEmail).Scan(&userID)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("%s: %w", fn, storage.ErrNotFound)
+		}
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+
+	var orderID int
+
+	err = tx.QueryRow(ctx,
+		`INSERT INTO orders (user_id, total_price) VALUES ($1, 0) RETURNING id`,
+		userID).Scan(&orderID)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+
+	for _, item := range items {
+		var productExists bool
+
+		err = tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM products WHERE id = $1)`,
+			item.ProductID).Scan(&productExists)
+
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", fn, err)
+		}
+		if !productExists {
+			return 0, fmt.Errorf("%s: %w", fn, storage.ErrNotFound)
+		}
+
+		result, err := tx.Exec(ctx,
+			`UPDATE products SET stock = stock - $1 WHERE id = $2 AND stock >= $1`,
+			item.Quantity, item.ProductID)
+
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", fn, err)
+		}
+
+		affectedRows := result.RowsAffected()
+		if affectedRows == 0 {
+			return 0, fmt.Errorf("%s: %w", fn, storage.ErrInsufficientStock)
+		}
+
+		_, err = tx.Exec(ctx,
+			`INSERT INTO order_items (order_id, product_id, quantity) VALUES ($1, $2, $3)`,
+			orderID, item.ProductID, item.Quantity)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", fn, err)
+		}
+
+		_, err = tx.Exec(ctx,
+			`UPDATE orders
+			SET total_price = total_price +
+				(SELECT price * $1 FROM products WHERE id = $2)
+			WHERE id = $3`,
+			item.Quantity, item.ProductID, orderID,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", fn, err)
+		}
+	}
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO transactions (order_id, amount, status) VALUES ($1, 
+		(SELECT total_price FROM orders WHERE id = $1), $2)`, orderID, "pending")
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("%s: %w", fn, err)
+	}
+
+	return orderID, nil
+}
