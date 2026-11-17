@@ -286,7 +286,24 @@ func (h *Handler) GetOrdersByUserEmail(w http.ResponseWriter, r *http.Request) {
 
 	// Получаем заказы пользователя
 	orders, err := h.storage.GetOrdersByUserEmail(r.Context(), email)
+
+	log.Info("storage result",
+		slog.String("email", email),
+		slog.Any("error", err),
+		slog.Bool("is_not_found", errors.Is(err, storage.ErrNotFound)),
+	)
+
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			log.Warn("user not found", slog.String("email", email))
+			w.WriteHeader(http.StatusNotFound)
+			render.JSON(w, r, map[string]string{
+				"error":   "Not found",
+				"message": "User not found",
+			})
+			return
+		}
+
 		log.Error("failed to get user orders", slog.Any("error", err))
 		w.WriteHeader(http.StatusInternalServerError)
 		render.JSON(w, r, map[string]string{
@@ -318,10 +335,7 @@ func (h *Handler) PlaceOrder(w http.ResponseWriter, r *http.Request) {
 
 	log.Info("Placing order", slog.String("url", r.URL.String()))
 
-	var request struct {
-		UserEmail string             `json:"user_email"`
-		Items     []models.OrderItem `json:"items"`
-	}
+	var request models.CheckoutRequest
 
 	if err := render.DecodeJSON(r.Body, &request); err != nil {
 		log.Error("failed to decode request body", slog.Any("error", err))

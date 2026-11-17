@@ -111,6 +111,18 @@ func (s *Storage) GetOrderByID(ctx context.Context, id int) (models.Order, error
 func (s *Storage) GetOrdersByUserEmail(ctx context.Context, email string) ([]models.Order, error) {
 	const fn = "storage.postgres.order.GetOrdersByUserEmail"
 
+	var userID int
+
+	err := s.db.QueryRow(ctx,
+		`SELECT id FROM users WHERE email = $1`, email).Scan(&userID)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, storage.ErrNotFound
+		}
+		return nil, err
+	}
+
 	rows, err := s.db.Query(ctx,
 		`SELECT o.id, o.user_id, o.total_price, o.created_at FROM orders o JOIN users u ON u.id = o.user_id
 		WHERE u.email = $1 ORDER BY o.created_at DESC;`, email)

@@ -36,3 +36,30 @@ type Transaction struct {
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 }
+
+type CheckoutRequest struct {
+	UserEmail string      `json:"user_email"`
+	Items     []OrderItem `json:"items"`
+}
+
+type OrderDetail struct {
+	OrderID           int               `json:"order_id"`
+	UserEmail         string            `json:"user_email"`
+	TotalPrice        float64           `json:"total_price"`
+	CreatedAt         time.Time         `json:"created_at"`
+	TransactionStatus string            `json:"transaction_status"`
+	TransactionAmount float64           `json:"transaction_amount"`
+	Items             []OrderItemDetail `json:"items"`
+}
+
+type OrderItemDetail struct {
+	ProductID   int    `json:"product_id"`
+	ProductName string `json:"product_name"`
+	Quantity    int    `json:"quantity"`
+}
+
+type PopularProduct struct {
+	ProductID   int    `json:"product_id"`
+	ProductName string `json:"product_name"`
+	TotalSold   int64  `json:"total_sold"`
+}
